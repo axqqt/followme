@@ -153,81 +153,67 @@ class InstagramManager {
         return usernames;
     }
 
-    async followUsers(targetProfile) {
+    async getLikersFromPost(postUrl) {
         try {
-            console.log(`Going to ${targetProfile}'s profile...`);
-            await this.page.goto(`https://www.instagram.com/${targetProfile}/`, {
-                waitUntil: 'networkidle0'
-            });
+            console.log(`Going to post: ${postUrl}`);
+            await this.page.goto(postUrl, { waitUntil: 'networkidle0' });
             await this.sleep(2);
 
-            console.log('Opening followers list...');
-            await this.page.waitForSelector('a[href$="/followers/"]');
-            await this.page.click('a[href$="/followers/"]');
+            // Click on likes count to open likers dialog
+            console.log('Opening likes list...');
+            await this.page.waitForSelector('a[href*="/liked_by/"]');
+            await this.page.click('a[href*="/liked_by/"]');
             await this.sleep(2);
 
             await this.page.waitForSelector('div[role="dialog"]');
             
-            let previousFollowCount = 0;
-            let noNewFollowsCount = 0;
+            // Collect usernames of people who liked the post
+            console.log('Collecting usernames of people who liked the post...');
+            const likers = await this.scrollAndCollectUsernames('a.x1i10hfl');
+            console.log(`Found ${likers.size} users who liked the post`);
+            
+            return likers;
+        } catch (error) {
+            console.error('Error getting post likers:', error);
+            return new Set();
+        }
+    }
 
-            while (await this.checkLimits()) {
+    async followUsers(postUrl) {
+        try {
+            const likers = await this.getLikersFromPost(postUrl);
+            
+            for (const username of likers) {
+                if (!(await this.checkLimits())) {
+                    break;
+                }
+
                 try {
-                    const followButtons = await this.page.$$('button');
-                    
-                    for (const button of followButtons) {
-                        try {
-                            const buttonText = await this.page.evaluate(el => el.textContent, button);
-                            
-                            if (buttonText === 'Follow') {
-                                if (!this.isFirstAction) {
-                                    console.log(`Waiting ${ACTION_DELAY} seconds...`);
-                                    await this.sleep(ACTION_DELAY);
-                                }
-                                this.isFirstAction = false;
-
-                                await button.click();
-                                this.actionsToday++;
-                                this.actionsThisHour++;
-                                
-                                console.log(`Followed user (${this.actionsToday} actions today, ${this.actionsThisHour} this hour)`);
-                                
-                                if (!(await this.checkLimits())) {
-                                    return;
-                                }
-                            }
-                        } catch (error) {
-                            continue;
-                        }
-                    }
-
-                    // Check if we're finding new people to follow
-                    if (this.actionsToday === previousFollowCount) {
-                        noNewFollowsCount++;
-                        if (noNewFollowsCount >= 3) {
-                            console.log('No new users found after 3 attempts, moving to unfollow phase...');
-                            break;
-                        }
-                    } else {
-                        noNewFollowsCount = 0;
-                    }
-                    previousFollowCount = this.actionsToday;
-
-                    // Scroll the followers list
-                    await this.page.evaluate(() => {
-                        const dialog = document.querySelector('div[role="dialog"]');
-                        if (dialog) dialog.scrollTop = dialog.scrollHeight;
-                    });
-                    
+                    // Go to user's profile
+                    await this.page.goto(`https://www.instagram.com/${username}/`);
                     await this.sleep(2);
 
+                    // Check for and click Follow button if present
+                    const followButton = await this.page.$('button:not(._acan._acap._acat):contains("Follow")');
+                    if (followButton) {
+                        if (!this.isFirstAction) {
+                            console.log(`Waiting ${ACTION_DELAY} seconds...`);
+                            await this.sleep(ACTION_DELAY);
+                        }
+                        this.isFirstAction = false;
+
+                        await followButton.click();
+                        this.actionsToday++;
+                        this.actionsThisHour++;
+                        console.log(`Followed ${username} (${this.actionsToday} actions today, ${this.actionsThisHour} this hour)`);
+                    }
                 } catch (error) {
-                    console.error('Error in follow loop:', error);
-                    break;
+                    console.error(`Error following ${username}:`, error);
+                    continue;
                 }
             }
         } catch (error) {
-            console.error('Error following users:', error);
+            console.error('Error in follow process:', error);
         }
     }
 
@@ -309,12 +295,12 @@ class InstagramManager {
         }
     }
 
-    async run(targetProfile) {
+    async run(postUrl) {
         try {
             await this.init();
             if (await this.login()) {
-                // First follow users from target profile
-                await this.followUsers(targetProfile);
+                // First follow users who liked the post
+                await this.followUsers(postUrl);
                 
                 // Then unfollow users who don't follow back
                 await this.unfollowNonFollowers();
@@ -333,14 +319,19 @@ class InstagramManager {
 const run = async () => {
     try {
         const bot = new InstagramManager();
-        const targetProfile = process.argv[2] || await new Promise(resolve => {
-            console.log('Enter Instagram profile URL or username:');
+        const postUrl = process.argv[2] || await new Promise(resolve => {
+            console.log('Enter Instagram post URL:');
             process.stdin.once('data', data => {
                 resolve(data.toString().trim());
             });
         });
         
-        await bot.run(targetProfile);
+        // Validate post URL
+        if (!postUrl.includes('instagram.com/p/') && !postUrl.includes('instagram.com/reel/')) {
+            throw new Error('Invalid Instagram post URL. Please provide a valid post or reel URL.');
+        }
+        
+        await bot.run(postUrl);
     } catch (error) {
         console.error('Program failed:', error);
     }
