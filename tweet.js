@@ -1,14 +1,17 @@
-const { TwitterApi } = require('twitter-api-v2');
-const axios = require('axios'); // For Gemini API requests
-const dotenv = require('dotenv');
+const { TwitterApi } = require("twitter-api-v2");
+const dotenv = require("dotenv");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const ScrapFly = require("scrapfly-sdk"); // ScrapFly library
 dotenv.config();
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
+// Initialize ScrapFly API
+const scrapfly = new ScrapFly({ apiKey: process.env.SCRAPFLY_API_KEY });
 
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Load Twitter API credentials from environment variables
+// Initialize Twitter API client
 const client = new TwitterApi({
   appKey: process.env.API_KEY,
   appSecret: process.env.API_SECRET,
@@ -16,84 +19,110 @@ const client = new TwitterApi({
   accessSecret: process.env.ACCESS_TOKEN_SECRET,
 });
 
-// Helper function to log actions with a timestamp
-const logAction = (action, userId) => {
-  console.log(`[${new Date().toISOString()}] ${action} with user ID: ${userId}`);
+// Helper function to log actions
+const logAction = (action, detail) => {
+  console.log(`[${new Date().toISOString()}] ${action}: ${detail}`);
 };
 
-
-
-// Function to interact with Gemini AI to generate personalized messages
-const generateMessageWithGemini = async (userName, context) => {
+// ScrapFly Function to Find Potential Clients
+const findPotentialClients = async (keyword) => {
   try {
-    // Replace the URL and API key with your actual Gemini API endpoint and key
-    const response = await axios.post('https://api.gemini-ai.com/generate', {
-      prompt: `Write a professional and engaging outreach message for a Social Media Marketing Agency looking to help businesses improve their online presence. The message should address ${userName} and reflect their interest in digital marketing.`,
-      context, // Additional context about your SMMA/SA
-      max_tokens: 100,
-    }, {
-      headers: {
-        'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`, // Use your Gemini API key
-        'Content-Type': 'application/json',
-      },
+    const response = await scrapfly.scrape({
+      url: `https://twitter.com/search?q=${encodeURIComponent(keyword)}&src=typed_query`,
+      renderJavascript: true, // Enable JavaScript rendering for dynamic content
     });
 
-    return response.data.message; // Return the generated message
+    // Extract user IDs or handles from scraped HTML
+    const users = []; // Process response.data.content to extract relevant data
+    const regex = /"screen_name":"(.*?)"/g; // Example regex to find Twitter handles
+    let match;
+    while ((match = regex.exec(response.data.content)) !== null) {
+      users.push(match[1]); // Collect Twitter handles
+    }
+
+    logAction("Found Potential Clients", `${users.length} users`);
+    return users;
   } catch (error) {
-    console.error('Error generating message with Gemini:', error.message);
+    console.error("Error finding potential clients with ScrapFly:", error.message);
+    return [];
+  }
+};
+
+// Generate personalized responses using Gemini AI
+const generateMessageWithGemini = async (userName, context, conversationHistory = []) => {
+  try {
+    let prompt;
+
+    if (conversationHistory.length === 0) {
+      prompt = `Write a professional and engaging follow-up message for a Social Media Marketing Agency. Address ${userName}, and offer personalized insights on how to improve their online presence. Include key benefits and be conversational.`;
+    } else {
+      const previousMessages = conversationHistory
+        .map((message, index) => (index % 2 === 0 ? `You: ${message}` : `Recipient: ${message}`))
+        .join("\n");
+      prompt = `Continue the conversation naturally based on the following context and history:\n\nContext: ${context}\n\nConversation:\n${previousMessages}\n\nRecipient:`;
+    }
+
+    const result = await model.generateContent({
+      prompt,
+      max_tokens: 100,
+    });
+
+    return result.response.text.trim();
+  } catch (error) {
+    console.error("Error generating message with Gemini:", error.message);
     return `Hi ${userName}, I’d love to connect and discuss how we can help you improve your brand’s online presence. Let’s chat!`;
   }
 };
 
-// Function to follow a user and send a DM
+// Follow and DM function
 const followAndDM = async (userId, userName, context) => {
   try {
-    // Follow the user
     await client.v2.follow(process.env.BOT_USER_ID, userId);
     logAction("Followed", userId);
 
-    // Random delay between follow and DM
-    await delay(randomDelay(5000, 15000)); // Wait between 5-15 seconds
+    await delay(randomDelay(5000, 15000)); // Delay to mimic human behavior
 
-    // Generate a personalized message with Gemini AI
-    const message = await generateMessageWithGemini(userName, context);
+    const introMessage = `Hi ${userName}, this is [Your Name] from [Your Agency]. We specialize in helping businesses grow their online presence. Let me know if you're open to a quick chat!`;
+    await client.v1.sendDm({ recipient_id: userId, text: introMessage });
+    logAction("Sent Intro DM", userId);
 
-    // Send a DM
-    await client.v1.sendDm({
-      recipient_id: userId,
-      text: message,
-    });
-    logAction("Sent DM", userId);
+    const followUpMessage = await generateMessageWithGemini(userName, context);
+    await delay(randomDelay(10000, 20000)); // Delay before follow-up
+    await client.v1.sendDm({ recipient_id: userId, text: followUpMessage });
+    logAction("Sent Follow-Up DM", userId);
   } catch (error) {
-    console.error(`Error: ${error.message}`);
+    console.error(`Error processing user ${userId}:`, error.message);
   }
 };
 
-// Utility function to add a delay
+// Delay utility
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Generate a random delay within a specified range (in milliseconds)
-const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+// Generate a random delay within a range
+const randomDelay = (min, max) =>
+  Math.floor(Math.random() * (max - min + 1)) + min;
 
-// Main function to start the bot
+// Main function
 const main = async () => {
-  // Your SMMA/SA context to guide Gemini's AI response
-  const context = "We specialize in helping businesses grow their online presence through tailored social media strategies, performance marketing, and cutting-edge automation tools.";
+  const context =
+    "We help businesses enhance their digital presence through targeted strategies, creative content, and automation tools.";
+  const keyword = "looking for social media help"; // Example search keyword
 
-  // Array of users to follow and DM (include userName for personalization)
-  const users = [
-    { userId: 'user_id1', userName: 'John Doe' },
-    { userId: 'user_id2', userName: 'Jane Smith' },
-  ];
+  const potentialClients = await findPotentialClients(keyword);
 
-  for (const { userId, userName } of users) {
-    await followAndDM(userId, userName, context);
+  for (const userHandle of potentialClients) {
+    const userId = await client.v2.userByUsername(userHandle); // Get user ID from handle
+    if (userId) {
+      await followAndDM(userId.data.id, userHandle, context);
 
-    // Delay to stay within rate limits (randomized between 30 and 60 minutes)
-    const delayTime = randomDelay(1800000, 3600000);
-    console.log(`Sleeping for ${delayTime / 60000} minutes to avoid rate limits.`);
-    await delay(delayTime);
+      const delayTime = randomDelay(1800000, 3600000); // 30-60 mins
+      console.log(`Sleeping for ${delayTime / 60000} minutes to avoid rate limits.`);
+      await delay(delayTime);
+    }
   }
 };
 
-main().catch(console.error);
+// Start the bot
+main().catch((error) =>
+  console.error("Error in main function:", error.message)
+);
